@@ -1,0 +1,158 @@
+from machine import I2C
+import time
+import xbee
+x = xbee.XBee()
+from machine import Pin
+from machine import ADC
+adc2 = ADC("D2")
+dest = b'\x00\x13\xa2\x00A\x87\xf6\xd8' # dedicated 77FC Coordinator xb3
+#dest = b'\x00\x13\xa2\x00At"c'
+fr1=b'~\x00\x18\x10\x01\x00\x13\xa2\x00At"c\xff\xfe\x00\x010123456789\xf4'
+i2c = I2C(1, freq=100000)
+fifo_status_reg= int('0x00') #    F_OVF F_WMRK_FLAG F_CNT5 F_CNT4 F_CNT3 F_CNT2 F_CNT1 F_CNT0  
+ctrl_reg1= int('0x2A')  # ASLP_RATE1 ASLP_RATE0 DR2 DR1 DR0 LNOISE F_READ ACTIVE
+ctrl_reg2= int('0x2B') # ST RST 0 SMODS1 SMODS0 SLPE MODS1 MODS0
+#ctrl_reg3= int('0x2C')
+ctrl_reg4= int('0x2D')  # INT_EN_ASLP INT_EN_FIFO INT_EN_TRANS INT_EN_LNDPR INT_EN_PULSE INT_EN_FF_MT — INT_EN_DRDY
+ctrl_reg5= int('0x2E')  # INT_CFG_ASLP INT_CFG_FIFO INT_CFG_TRANS INT_CFG_LNDPRT INT_CFG_PULSE INT_CFG_FF_MT — INT_CFG_DRDY
+fifo_setup_reg = int('0x09') # F_MODE1 F_MODE0 F_WMRK5 F_WMRK4 F_WMRK3 F_WMRK2 F_WMRK1 F_WMRK0
+XYZ_DATA_CFG__Reg = int('0x0E') # 0 0 0 HPF_OUT 0 0 FS1 FS0
+
+cycle = 0
+Failures =0
+def accel(ms_byte, ls_byte):  #+++++++++++++++++ Acceleration Calc BEGIN ++++++++++++++++++++
+	"This computes acceleration given two bytes of data from MMA8451Q Accelerometer"
+	sign = 1
+	unit = 0
+	shift_word=(256*ms_byte+ ls_byte)>>2 #shift 16 bit word right 2 places for 14 bit sample
+	sign_bit= 0x2000&shift_word          #mask for bit 13 (sign bit)
+	if sign_bit == 8192:
+		sign = -1
+#		shift_word =(shift_word ^ 0x3fff)+1 # bitwise invert all 14 bits of word +1 -- 2's compliment
+		shift_word = ~shift_word+1
+	unit_bit= 0x1000&shift_word             # mask for bit 12---unit bit
+	if unit_bit == 4096:
+		unit = 1
+	fraction=(0x0fff&shift_word)*2**(-12) # fractional part of acceleration
+	accel = sign*(unit+fraction)
+	return accel ;                  #+++++++++++++++++ Acceleration Calc END +++++++++++++++++
+	
+def blink_led(num_blinks):  #+++++++++++++++++++++++++++++ BLINK LED BEGIN ++++++++++++++++++++++++++++++++++++++
+	"This blinks an led"
+	for n in range (0, num_blinks):
+		led = Pin("D0", Pin.OUT, value=1)  # ON change to D11 from D0 for dev bd, value= from 1 to 0 for dev bd
+		time.sleep(.1)
+		led = Pin("D0", Pin.OUT, value=0)# OFF change to D11 from D0 for dev bd, value= from 0 to 1 for dev bd
+		time.sleep(.1)
+	return                  #+++++++++++++++++++++++++++++ BLINK LED END ++++++++++++++++++++++++++++++++++++++
+	
+blink_led(num_blinks=10)
+	
+i2c.writeto_mem(28, ctrl_reg2, b'\x40') # reset mma8451
+time.sleep(2)  # wait for reset to finish--may be unnecessary
+i2c.writeto_mem(28, ctrl_reg1, b'\x14'); # CRTL_REG1: 100 Hz mode DR = 010,LNOISE =1 F_Read = 0, Active = 0,
+i2c.writeto_mem(28, ctrl_reg2, b'\x02') # high res mode
+i2c.writeto_mem(28, ctrl_reg4, b'\x40') # Enable the interrupt Pin for the FIFO
+i2c.writeto_mem(28, ctrl_reg5, b'\x40') # Set the interrupt to route to INT1
+i2c.writeto_mem(28, XYZ_DATA_CFG__Reg, b'\x00') # NO HPF_OUT set, 2g mode
+i2c.writeto_mem(28, fifo_setup_reg, b'\x80') # FIFO Set to Fill Mode
+
+
+'''
+  mma.writeRegister8(0x2a, 0x14); // CRTL_REG1: 100 Hz mode DR = 010,LNOISE =1 F_Read = 0, Active = 0,
+  Serial.print(" post write 0x14 Ctrlreg1 data :  "); Serial.println(mma.getCtrlreg1(),HEX); 
+  mma.writeRegister8(0x09, 0x80); // FIFO Set to Fill Mode
+  mma.writeRegister8(0x2D, 0x40); // Enable the interrupt Pin for the FIFO
+  mma.writeRegister8(0x2E, 0x40); // Set the interrupt to route to INT1
+  mma.writeRegister8(0x0E, 0x00); //NO HPF_OUT set, 2g mode   XYZ_DATA_CFG Register
+'''	
+
+i2c.writeto_mem(28, ctrl_reg1, b'\x1D') # 100 Hz mode DR = 011,LNOISE =1 F_Read = 0, Active = 1,
+time.sleep(2)
+while cycle < 36000 : # Don't want to run indefinitely for now
+	fifo_status = i2c.readfrom_mem(28, fifo_status_reg, 1)
+	bytes_in_fifo = 6*int.from_bytes(fifo_status,'big')
+	if bytes_in_fifo == 960:
+		bytes_in_fifo =192
+	print('bytes in fifo', bytes_in_fifo, '\n')
+	raw_data = i2c.readfrom_mem(28, 1, bytes_in_fifo)
+	data_list = list(raw_data) # read xyz accel data
+	'''
+	accel_x=accel(data_list[0],data_list[1])
+	accel_y=accel(data_list[2],data_list[3])
+	accel_z=accel(data_list[4],data_list[5])
+	
+	for i in range (0,len(data_list), 1):
+		if i %6 ==0:
+			print(' / ')
+		print(hex(data_list[i]),'*', end='')
+#	print('\n')
+	'''
+#	read fifo status
+#	fifo_status = i2c.readfrom_mem(28, fifo_status_reg, 1)
+#	print('fifo status: ', fifo_status, '\n')
+
+	
+#	print(' acceleration X=',accel_x,'\n','acceleration Y=',accel_y,'\n','acceleration Z=',accel_z,end='')
+	print('\n\n')
+	time.sleep(.2)
+	#	read fifo status
+	fifo_status = i2c.readfrom_mem(28, fifo_status_reg, 1)
+	print('fifo status: ', int.from_bytes(fifo_status,'big'),'bytes in fifo', '\n')
+#	print('fifo status: ',fifo_status ,'bytes in fifo', '\n')
+	cycle = cycle + 1
+
+	try:
+		xbee.transmit(dest, raw_data)
+	#	time.sleep(.1)
+	#	xbee.receive()
+	#	if cycle %10 == 0:
+	#		xbee.transmit(dest, Batt_v_bytes)
+		
+		adc_value2 = adc2.read()
+		Batt_v = int(3.968*(adc_value2)) #(1250/4095)*(10k+120k)/(10k)=3.968 adj to real values (make sure no pullup in xbee)
+		Batt_v_bytes = (Batt_v).to_bytes(2,"big")
+		Batt_v_str = str(Batt_v)
+		print('\n\n','Batt_v:', Batt_v_str, ' Batt_v:', Batt_v_bytes )
+		if cycle %10 == 0:
+			blink_led(num_blinks=2)
+	except Exception as e:
+		Failures = Failures + 1
+		print("Failure: " +  str(e))    #************************PRINT*****************************	
+		time.sleep(1) # 
+			
+
+i2c.writeto_mem(28, ctrl_reg1, b'\x20') # change to standby mode
+	
+'''
+Useful statements:
+addr = i2c.scan()
+i2c.readfrom_mem(28, 1, 6) # read xyz accel data
+i2c.readfrom_mem(28, 42, 1)  #read control reg
+i2c.readfrom_mem(28, 14, 1)# read cfg reg 0x0E XYZ_DATA_CFG
+i2c.writeto_mem(28, 42, b'\x01') # change to active mode
+
+# TO READ CONTENTS OF REGISTERS:
+from machine import I2C
+import time
+i2c = I2C(1, freq=100000)
+ctrl_reg1= int('0x2A')
+i2c.writeto_mem(28, ctrl_reg1, b'\x20') # change to standby mode
+time.sleep(1)
+data = i2c.readfrom_mem(28, 9, 50) # read all registers
+data_list = list(data)
+for i in range (9,len(data), 1):
+	print(hex(i),':',hex(data_list[i]),' *** ', end='')
+print('\n')
+Register data( register: hex data)
+*** 0x9 : 0x0  *** 0xa : 0x44  *** 0xb : 0x84  *** 0xc : 0x0  *** 0xd : 0x0  *** 0xe : 0x0  *** 0xf : 0x0  
+*** 0x10 : 0x0  *** 0x11 : 0x0  *** 0x12 : 0x0  *** 0x13 : 0x0  *** 0x14 : 0x0  *** 0x15 : 0x0  
+*** 0x16 : 0x0  *** 0x17 : 0x0  *** 0x18 : 0x0  *** 0x19 : 0x0  *** 0x1a : 0x0  *** 0x1b : 0x0  
+*** 0x1c : 0x0  *** 0x1d : 0x0  *** 0x1e : 0x0  *** 0x1f : 0x0  *** 0x20 : 0x0  *** 0x21 : 0x20  
+*** 0x22 : 0x2  *** 0x23 : 0x0  *** 0x24 : 0x0  *** 0x25 : 0x0  *** 0x26 : 0x0  *** 0x27 : 0x0  
+*** 0x28 : 0x0  *** 0x29 : 0x1a  *** 0x2a : 0x0  *** 0x2b : 0x0  *** 0x2c : 0x0  *** 0x2d : 0x80  
+*** 0x2e : 0x0  *** 0x2f : 0x44  *** 0x30 : 0x84  *** 0x31 : 0x0  *** 
+
+
+'''
+
