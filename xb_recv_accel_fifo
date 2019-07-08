@@ -1,0 +1,66 @@
+import micropython
+from sys import stdin, stdout
+
+from machine import I2C
+import time
+import xbee
+x = xbee.XBee()
+from machine import Pin
+from machine import ADC
+
+def accel(ms_byte, ls_byte):  #+++++++++++++++++ Acceleration Calc BEGIN ++++++++++++++++++++
+	"This computes acceleration given two bytes of data from MMA8451Q Accelerometer"
+	sign = 1
+	unit = 0
+	shift_word=(256*ms_byte+ ls_byte)>>2 #shift 16 bit word right 2 places for 14 bit sample
+	sign_bit= 0x2000&shift_word          #mask for bit 13 (sign bit)
+	if sign_bit == 8192:
+		sign = -1
+#		shift_word =(shift_word ^ 0x3fff)+1 # bitwise invert all 14 bits of word +1 -- 2's compliment
+		shift_word = ~shift_word+1
+	unit_bit= 0x1000&shift_word             # mask for bit 12---unit bit
+	if unit_bit == 4096:
+		unit = 1
+	fraction=(0x0fff&shift_word)*2**(-12) # fractional part of acceleration
+	accel = sign*(unit+fraction)
+	return accel ;                  #+++++++++++++++++ Acceleration Calc END +++++++++++++++++
+	
+def blink_led(num_blinks):  #+++++++++++++++++++++++++++++ BLINK LED BEGIN ++++++++++++++++++++++++++++++++++++++
+	"This blinks an led"
+	for n in range (0, num_blinks):
+		led = Pin("D5", Pin.OUT, value=1)  # ON change to D11 from D0 for dev bd, value= from 1 to 0 for dev bd
+		time.sleep(.1)
+		led = Pin("D5", Pin.OUT, value=0)# OFF change to D11 from D0 for dev bd, value= from 0 to 1 for dev bd
+		time.sleep(.1)
+	return                  #+++++++++++++++++++++++++++++ BLINK LED END ++++++++++++++++++++++++++++++++++++++
+	
+blink_led(num_blinks=10)	
+	
+	
+	
+
+cycle = 0
+while cycle < 36000 :
+	rcv1 = xbee.receive()
+	if rcv1 :
+		pay_load = rcv1['payload']
+#		print ('Payload:', pay_load)
+		if len(pay_load) ==2:
+			print('Battery Voltage =', 256*pay_load[0]+pay_load[1])
+		if len(pay_load) > 20:	
+			raw_data = pay_load
+			data_list = list(raw_data) # read xyz accel data
+			for i in range (0, len(pay_load), 6):
+				accel_x=accel(data_list[i],data_list[i+1])
+				accel_y=accel(data_list[i+2],data_list[i+3])
+				accel_z=accel(data_list[i+4],data_list[i+5])
+				print(' acc X=',accel_x,' ','acc Y=',accel_y,' ','acc Z=',accel_z,'\n',end='')
+			print('\n\n')
+#			print('raw_data', raw_data)
+			stdout.buffer.write(raw_data)
+			if accel_x > .99:
+				blink_led(num_blinks=10)
+	cycle = cycle +1
+	time.sleep(.5)
+	
+#https://www.digi.com/resources/documentation/digidocs/PDFs/90002219.pdf  p56 for read and write statements
